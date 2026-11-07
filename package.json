@@ -1,0 +1,46 @@
+{
+  "name": "opencode-browse-openchamber-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenChamber browser provider that drives the user's browser through the browse relay.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.0.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "browse-bridge",
+        "name": "Browse Bridge",
+        "icon": "global"
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "provides": [
+          "browser"
+        ],
+        "permissions": {
+          "exec": [
+            "browse"
+          ]
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "openchamber-guest-bundle --node src/service/main.ts service/main.js",
+    "pack": "bun run build && bun scripts/pack.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openchamber/sdk": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "bun-types": "^1.1.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+
+# Build output; `bun run build` and `bun run pack` write it.
+service/main.js
+.DS_Store
+
+# Local runtime config, copied from browse-bridge.example.json
+browse-bridge.json
