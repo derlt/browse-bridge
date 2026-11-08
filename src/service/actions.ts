@@ -468,7 +468,8 @@ async function snapshotResult(
     const own = await ownTargets(relay, sessionId, deadline);
     data.tabs = own.map((target): BrowserTab => ({
       id: target.id,
-      title: target.title,
+      // The relay reports the URL as a target title; the page has the real one.
+      title: target.id === activeTabId ? data.title : target.title,
       url: target.url,
       active: target.id === activeTabId,
     }));

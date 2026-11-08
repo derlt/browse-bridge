@@ -144,7 +144,7 @@ describe('handleBrowserAction', () => {
       viewport: { mode: 'fill', width: null, height: null },
       activeTabId: 'T1',
     };
-    const relay = fakeRelay({ targets: [ownTab], result: result(snapshot) });
+    const relay = fakeRelay({ targets: [{ ...ownTab, title: 'https://example.com' }], result: result(snapshot) });
 
     const answer = await handleBrowserAction(request('browser.snapshot', {}), deps(relay));
 
