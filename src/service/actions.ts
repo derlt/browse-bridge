@@ -1,4 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
+import {
+  BROWSER_PROVIDER_ACTION_TIMEOUT_MS,
+  BROWSER_PROVIDER_OPEN_TIMEOUT_MS,
+} from '@openchamber/sdk';
 import type {
   BrowserClickParameters,
   BrowserInspectParameters,
@@ -86,6 +90,16 @@ function sanitizeSessionId(sessionId: string): string {
 
 const defaultState = new BridgeState();
 
+/**
+ * Leave time for the HTTP answer before the host's own timeout fires. The host
+ * reads a late answer as a failure and the action may already have run.
+ */
+const RESPONSE_MARGIN_MS = 1_500;
+/** A cold relay start may use this much of an action's budget. */
+const ACTION_START_BUDGET_MS = 4_000;
+/** An open may wait longer for a cold relay; it has the larger budget. */
+const OPEN_START_BUDGET_MS = 6_000;
+
 class ActionError extends Error {
   constructor(message: string) {
     super(message);
@@ -93,13 +107,18 @@ class ActionError extends Error {
   }
 }
 
-async function ownTargets(relay: BrowseRelay, sessionId: string): Promise<RelayTarget[]> {
-  const targets = await relay.targets();
+async function ownTargets(relay: BrowseRelay, sessionId: string, deadline: number): Promise<RelayTarget[]> {
+  const targets = await relay.targets({ deadline, startBudgetMs: ACTION_START_BUDGET_MS });
   return targets.filter((target) => target.opencodeBrowserSessionId === sessionId);
 }
 
-async function requireOwnTarget(relay: BrowseRelay, sessionId: string, tabId: string): Promise<RelayTarget> {
-  const own = await ownTargets(relay, sessionId);
+async function requireOwnTarget(
+  relay: BrowseRelay,
+  sessionId: string,
+  tabId: string,
+  deadline: number,
+): Promise<RelayTarget> {
+  const own = await ownTargets(relay, sessionId, deadline);
   const target = own.find((entry) => entry.id === tabId);
   if (!target) {
     throw new ActionError(`No tab ${tabId} in this session; call browser.snapshot to list tabs.`);
@@ -112,8 +131,9 @@ async function requireAndRemember(
   state: BridgeState,
   sessionId: string,
   tabId: string,
+  deadline: number,
 ): Promise<void> {
-  await requireOwnTarget(relay, sessionId, tabId);
+  await requireOwnTarget(relay, sessionId, tabId, deadline);
   state.rememberTab(sessionId, tabId);
 }
 
@@ -416,8 +436,10 @@ async function run(
   sessionId: string,
   code: string,
   timeoutMs: number,
+  deadline: number,
+  startBudgetMs: number,
 ): Promise<BrowserProviderResult> {
-  return readWire(await relay.execute(code, { sessionId, timeoutMs }));
+  return readWire(await relay.execute(code, { sessionId, timeoutMs, deadline, startBudgetMs }));
 }
 
 async function snapshotResult(
@@ -426,15 +448,24 @@ async function snapshotResult(
   sessionId: string,
   parameters: BrowserSnapshotParameters,
   tabId: string | undefined,
+  deadline: number,
+  startBudgetMs: number,
 ): Promise<BrowserProviderResult> {
-  const result = await run(relay, sessionId, snapshotCode(parameters, tabId, state.viewport(tabId)), 18_000);
+  const result = await run(
+    relay,
+    sessionId,
+    snapshotCode(parameters, tabId, state.viewport(tabId)),
+    18_000,
+    deadline,
+    startBudgetMs,
+  );
   if (!result.ok) return result;
 
   const wire = result.data as BrowserSnapshotData & { activeTabId?: string };
   const { activeTabId, ...data } = wire;
   if (activeTabId) state.rememberTab(sessionId, activeTabId);
   try {
-    const own = await ownTargets(relay, sessionId);
+    const own = await ownTargets(relay, sessionId, deadline);
     data.tabs = own.map((target): BrowserTab => ({
       id: target.id,
       title: target.title,
@@ -453,8 +484,15 @@ async function captureResult(
   sessionId: string,
   tabId: string | undefined,
   timeoutMs: number,
+  deadline: number,
+  startBudgetMs: number,
 ): Promise<BrowserProviderResult> {
-  const raw = await relay.execute(captureCode(tabId, state.viewport(tabId)), { sessionId, timeoutMs });
+  const raw = await relay.execute(captureCode(tabId, state.viewport(tabId)), {
+    sessionId,
+    timeoutMs,
+    deadline,
+    startBudgetMs,
+  });
   const wire = readWire(raw);
   if (!wire.ok) return wire;
 
@@ -500,11 +538,17 @@ export async function handleBrowserAction(
   const tabId = request.parameters.tabId;
   let effectiveTabId = tabId;
 
+  const hostLimitMs = request.action === 'browser.open'
+    ? BROWSER_PROVIDER_OPEN_TIMEOUT_MS
+    : BROWSER_PROVIDER_ACTION_TIMEOUT_MS;
+  const deadline = Date.now() + hostLimitMs - RESPONSE_MARGIN_MS;
+  const startBudgetMs = request.action === 'browser.open' ? OPEN_START_BUDGET_MS : ACTION_START_BUDGET_MS;
+
   try {
     if (request.action !== 'browser.open' && !tabId) {
       const remembered = state.lastTabId(sessionId);
       if (remembered) {
-        const own = await ownTargets(deps.relay, sessionId);
+        const own = await ownTargets(deps.relay, sessionId, deadline);
         if (own.some((target) => target.id === remembered)) {
           effectiveTabId = remembered;
         } else {
@@ -515,9 +559,16 @@ export async function handleBrowserAction(
 
     switch (request.action) {
       case 'browser.open': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
         const mode = request.parameters.viewport ?? state.viewport(tabId);
-        const result = await run(deps.relay, sessionId, openCode(request.parameters, tabId, mode), 40_000);
+        const result = await run(
+          deps.relay,
+          sessionId,
+          openCode(request.parameters, tabId, mode),
+          40_000,
+          deadline,
+          startBudgetMs,
+        );
         if (result.ok) {
           const data = result.data as BrowserOpenData;
           if (data.tabId) {
@@ -529,46 +580,106 @@ export async function handleBrowserAction(
         return result;
       }
       case 'browser.snapshot': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await snapshotResult(deps.relay, state, sessionId, request.parameters, effectiveTabId);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await snapshotResult(
+          deps.relay,
+          state,
+          sessionId,
+          request.parameters,
+          effectiveTabId,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.click': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await run(deps.relay, sessionId, clickCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await run(
+          deps.relay,
+          sessionId,
+          clickCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.type': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await run(deps.relay, sessionId, typeCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await run(
+          deps.relay,
+          sessionId,
+          typeCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.select': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await run(deps.relay, sessionId, selectCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await run(
+          deps.relay,
+          sessionId,
+          selectCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.scroll': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await run(deps.relay, sessionId, scrollCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await run(
+          deps.relay,
+          sessionId,
+          scrollCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.back':
       case 'browser.forward': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
         return await run(
           deps.relay,
           sessionId,
           navigationCode(request.action === 'browser.back' ? 'back' : 'forward', effectiveTabId),
           18_000,
+          deadline,
+          startBudgetMs,
         );
       }
       case 'browser.inspect': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await run(deps.relay, sessionId, inspectCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await run(
+          deps.relay,
+          sessionId,
+          inspectCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.capture': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        return await captureResult(deps.relay, state, sessionId, effectiveTabId, 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        return await captureResult(
+          deps.relay,
+          state,
+          sessionId,
+          effectiveTabId,
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
       }
       case 'browser.resize': {
-        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId);
-        const result = await run(deps.relay, sessionId, resizeCode(request.parameters, effectiveTabId), 18_000);
+        if (tabId) await requireAndRemember(deps.relay, state, sessionId, tabId, deadline);
+        const result = await run(
+          deps.relay,
+          sessionId,
+          resizeCode(request.parameters, effectiveTabId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
         if (result.ok) {
           const data = result.data as BrowserResizeData & { tabId?: string };
           if (data.tabId) {
@@ -583,14 +694,21 @@ export async function handleBrowserAction(
         if (targetId) {
           // Closing a background tab must not make it the chat's last-used
           // tab, so this checks ownership without remembering it.
-          if (tabId) await requireOwnTarget(deps.relay, sessionId, tabId);
+          if (tabId) await requireOwnTarget(deps.relay, sessionId, tabId, deadline);
         } else {
-          const own = await ownTargets(deps.relay, sessionId);
+          const own = await ownTargets(deps.relay, sessionId, deadline);
           const last = own[own.length - 1];
           if (!last) return { ok: false, error: 'No tab in this session to close. Call browser.open first.' };
           targetId = last.id;
         }
-        const result = await run(deps.relay, sessionId, closeCode(targetId), 18_000);
+        const result = await run(
+          deps.relay,
+          sessionId,
+          closeCode(targetId),
+          18_000,
+          deadline,
+          startBudgetMs,
+        );
         if (result.ok) state.forgetTab(sessionId, targetId);
         return result;
       }

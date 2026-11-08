@@ -119,4 +119,41 @@ describe('BrowseRelay', () => {
     await expect(relay.execute('return 1', { sessionId: 'oc-ses_1', timeoutMs: 1_000 }))
       .rejects.toThrow('not reachable');
   });
+
+  test('stops at the caller deadline instead of waiting for the relay timeout', async () => {
+    const port = await startRelay((request, response) => {
+      if (request.url === '/version') {
+        response.writeHead(200);
+        response.end('{}');
+        return;
+      }
+      if (request.url === '/cli/execute') {
+        const timer = setTimeout(() => {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({
+            text: '',
+            isError: false,
+            value: { ok: true, data: {} },
+            session: { id: 'oc-ses_1' },
+          }));
+        }, 5_000);
+        request.on('close', () => clearTimeout(timer));
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    const home = tempHome();
+    fs.writeFileSync(relayTokenPath({ browseBin: 'browse', relayPort: port, browseHome: home, startRelay: false }), 'test-token\n');
+    const relay = new BrowseRelay({ browseBin: 'browse', relayPort: port, browseHome: home, startRelay: false });
+
+    const start = Date.now();
+    await expect(relay.execute('return 1', {
+      sessionId: 'oc-ses_1',
+      timeoutMs: 5_000,
+      deadline: Date.now() + 500,
+    })).rejects.toThrow('did not answer within the time limit');
+    expect(Date.now() - start).toBeLessThan(2_000);
+  });
 });

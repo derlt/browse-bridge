@@ -33,6 +33,20 @@ export class RelayError extends Error {
   }
 }
 
+/** How long a call may wait for the relay to start when the caller sets no deadline. */
+const DEFAULT_START_BUDGET_MS = 10_000;
+/** The shortest fetch timeout; below this a probe is not worth making. */
+const MIN_FETCH_TIMEOUT_MS = 500;
+/** The relay's `/version` probe is cheap; a second is enough. */
+const VERSION_PROBE_MS = 1_000;
+
+export type RelayCallOptions = {
+  /** Absolute time by which the host needs an answer. */
+  deadline?: number;
+  /** How much of that time the relay may spend starting. */
+  startBudgetMs?: number;
+};
+
 /** browse's data root: OPENCODE_BROWSER_HOME, else the XDG data folder plus `/browse`. */
 export function browseDataRoot(config: BridgeConfig): string {
   if (config.browseHome) return config.browseHome;
@@ -77,18 +91,21 @@ export class BrowseRelay {
   }
 
   /** Resolves once the relay answers; starts `browse serve` when it is down. */
-  async ensure(): Promise<void> {
-    if (await this.versionReachable()) return;
+  async ensure(options: RelayCallOptions = {}): Promise<void> {
+    const now = Date.now();
+    const deadline = options.deadline ?? now + DEFAULT_START_BUDGET_MS;
+    if (await this.versionReachable(deadline)) return;
     if (!this.startingPromise) {
-      this.startingPromise = this.startIfNeeded().finally(() => {
+      const startDeadline = Math.min(deadline, now + (options.startBudgetMs ?? DEFAULT_START_BUDGET_MS));
+      this.startingPromise = this.startIfNeeded(startDeadline).finally(() => {
         this.startingPromise = null;
       });
     }
     return this.startingPromise;
   }
 
-  private async startIfNeeded(): Promise<void> {
-    if (await this.versionReachable()) return;
+  private async startIfNeeded(deadline: number): Promise<void> {
+    if (await this.versionReachable(deadline)) return;
     if (!this.config.startRelay) {
       throw new RelayError(
         `browse relay is not reachable at ${this.baseUrl}. Start it with \`browse serve\` or set startRelay to true in browse-bridge.json.`,
@@ -120,29 +137,47 @@ export class BrowseRelay {
       );
     }
 
-    const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      if (await this.versionReachable()) return;
+      if (await this.versionReachable(deadline)) return;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     throw new RelayError(
-      `browse relay did not start at ${this.baseUrl}. Run \`browse serve\` in a terminal to see why.`,
+      `browse relay did not start at ${this.baseUrl} within the time limit. Run \`browse serve\` in a terminal to see why.`,
       'RELAY_START_TIMEOUT',
     );
   }
 
-  private async versionReachable(): Promise<boolean> {
+  private async versionReachable(deadline?: number): Promise<boolean> {
+    const remaining = deadline === undefined ? VERSION_PROBE_MS : deadline - Date.now();
+    if (remaining <= 0) return false;
     try {
-      const response = await fetch(`${this.baseUrl}/version`, { signal: AbortSignal.timeout(1_000) });
+      const response = await fetch(`${this.baseUrl}/version`, {
+        signal: AbortSignal.timeout(Math.max(MIN_FETCH_TIMEOUT_MS, Math.min(VERSION_PROBE_MS, remaining))),
+      });
       return response.ok;
     } catch {
       return false;
     }
   }
 
-  async execute(code: string, options: { sessionId: string; timeoutMs: number }): Promise<RelayExecuteResult> {
-    await this.ensure();
+  async execute(
+    code: string,
+    options: { sessionId: string; timeoutMs: number } & RelayCallOptions,
+  ): Promise<RelayExecuteResult> {
+    await this.ensure(options);
     const token = readToken(this.config);
+    const remaining = options.deadline === undefined
+      ? options.timeoutMs + 5_000
+      : options.deadline - Date.now();
+    if (remaining <= 0) {
+      throw new RelayError(
+        'The browse relay did not answer within the host time limit. The page may still be loading; try again.',
+        'RELAY_TIMEOUT',
+      );
+    }
+    const relayTimeoutMs = Math.max(MIN_FETCH_TIMEOUT_MS, Math.min(options.timeoutMs, remaining - 500));
+    const fetchTimeoutMs = Math.max(MIN_FETCH_TIMEOUT_MS, Math.min(options.timeoutMs + 5_000, remaining));
+
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/cli/execute`, {
@@ -155,14 +190,17 @@ export class BrowseRelay {
           sessionId: options.sessionId,
           code,
           createIfMissing: true,
-          timeoutMs: options.timeoutMs,
+          timeoutMs: relayTimeoutMs,
         }),
-        signal: AbortSignal.timeout(options.timeoutMs + 5_000),
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
     } catch (error) {
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new RelayError(
-        `browse relay did not answer: ${error instanceof Error ? error.message : String(error)}`,
-        'RELAY_UNREACHABLE',
+        timedOut
+          ? `The browse relay did not answer within the time limit (${Math.round(fetchTimeoutMs / 1_000)} s). The page may still be loading; try again.`
+          : `browse relay did not answer: ${error instanceof Error ? error.message : String(error)}`,
+        timedOut ? 'RELAY_TIMEOUT' : 'RELAY_UNREACHABLE',
       );
     }
     if (!response.ok) {
@@ -175,19 +213,31 @@ export class BrowseRelay {
     return await response.json() as RelayExecuteResult;
   }
 
-  async targets(): Promise<RelayTarget[]> {
-    await this.ensure();
+  async targets(options: RelayCallOptions = {}): Promise<RelayTarget[]> {
+    await this.ensure(options);
     const token = readToken(this.config);
+    const remaining = options.deadline === undefined ? 5_000 : options.deadline - Date.now();
+    if (remaining <= 0) {
+      throw new RelayError(
+        'The browse relay did not answer within the host time limit. Try again.',
+        'RELAY_TIMEOUT',
+      );
+    }
+    const fetchTimeoutMs = Math.max(MIN_FETCH_TIMEOUT_MS, Math.min(5_000, remaining));
+
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/json/list`, {
         headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
     } catch (error) {
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new RelayError(
-        `browse relay did not answer: ${error instanceof Error ? error.message : String(error)}`,
-        'RELAY_UNREACHABLE',
+        timedOut
+          ? `The browse relay did not answer within the time limit (${Math.round(fetchTimeoutMs / 1_000)} s). Try again.`
+          : `browse relay did not answer: ${error instanceof Error ? error.message : String(error)}`,
+        timedOut ? 'RELAY_TIMEOUT' : 'RELAY_UNREACHABLE',
       );
     }
     if (!response.ok) {
