@@ -17,9 +17,9 @@ bun install
 bun run pack
 ```
 
-`bun run pack` builds `service/main.js` and writes a clean extension folder to `dist/extension`, without `node_modules`, `src` or `test`.
+`bun run pack` rebuilds `service/main.js` and writes a clean extension folder to `dist/extension`, without `node_modules`, `src` or `test`.
 
-`service/main.js` is build output and is not committed. Run `bun run build` or `bun run pack` before you install the extension from the repository folder.
+The repository ships the built `service/main.js`, so a Git install works without Bun. Run `bun run build` after a source change and commit the result; CI fails when the bundle and the source differ.
 
 ## Install
 
