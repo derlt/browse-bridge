@@ -84,6 +84,10 @@ async function main(): Promise<void> {
   const config = readBridgeConfig(extensionRoot);
   const relay = new BrowseRelay(config);
   const server = createBridgeServer({ relay, token });
+  server.on('error', (error) => {
+    console.error(`browse bridge could not listen on 127.0.0.1:${port}: ${error.message}`);
+    process.exit(1);
+  });
   server.listen(port, '127.0.0.1', () => {
     console.log(`browse bridge listening on 127.0.0.1:${port}`);
   });

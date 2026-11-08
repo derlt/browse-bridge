@@ -73,6 +73,20 @@ function readToken(config: BridgeConfig): string {
 }
 
 /**
+ * The environment for `browse serve`. The service token authenticates the host
+ * to this service; browse does not need it, and the relay is detached and
+ * outlives the service, so it must not keep it.
+ */
+export function browseEnv(config: BridgeConfig, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  delete env.OPENCHAMBER_SERVICE_TOKEN;
+  delete env.OPENCHAMBER_SERVICE_PORT;
+  env.OPENCODE_BROWSER_PORT = String(config.relayPort);
+  if (config.browseHome) env.OPENCODE_BROWSER_HOME = config.browseHome;
+  return env;
+}
+
+/**
  * The relay on the user's machine. Agents, the CLI and this bridge reach it on
  * loopback; only the browser extension reaches it over the network.
  *
@@ -115,20 +129,23 @@ export class BrowseRelay {
 
     const bin = resolveBrowseBin(this.config);
     const command = /\.(?:mjs|cjs|js)$/.test(bin) ? [process.execPath, bin] : [bin];
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      OPENCODE_BROWSER_PORT: String(this.config.relayPort),
-    };
-    if (this.config.browseHome) env.OPENCODE_BROWSER_HOME = this.config.browseHome;
+    let spawnError: Error | null = null;
 
     try {
       const child = spawn(command[0]!, [...command.slice(1), 'serve'], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
-        env,
+        env: browseEnv(this.config),
       });
-      child.on('error', () => {});
+      child.once('error', (error) => {
+        spawnError = error;
+      });
+      child.once('exit', (code, signal) => {
+        if (code !== 0 || signal) {
+          spawnError = new Error(`browse serve exited (code ${code}, signal ${signal})`);
+        }
+      });
       child.unref();
     } catch (error) {
       throw new RelayError(
@@ -139,12 +156,27 @@ export class BrowseRelay {
 
     while (Date.now() < deadline) {
       if (await this.versionReachable(deadline)) return;
+      if (spawnError) {
+        if (await this.versionReachable(deadline)) return;
+        throw this.spawnFailure(bin, spawnError);
+      }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     throw new RelayError(
       `browse relay did not start at ${this.baseUrl} within the time limit. Run \`browse serve\` in a terminal to see why.`,
       'RELAY_START_TIMEOUT',
     );
+  }
+
+  private spawnFailure(bin: string, error: Error): RelayError {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      return new RelayError(
+        `browse was not found at ${bin}. Install browse or set browseBin in browse-bridge.json.`,
+        'BROWSE_NOT_FOUND',
+      );
+    }
+    return new RelayError(`Could not start browse: ${error.message}`, 'RELAY_START_FAILED');
   }
 
   private async versionReachable(deadline?: number): Promise<boolean> {

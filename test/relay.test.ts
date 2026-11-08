@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowseRelay, relayTokenPath } from '../src/service/browseRelay.ts';
+import { BrowseRelay, browseEnv, relayTokenPath } from '../src/service/browseRelay.ts';
 
 const servers: http.Server[] = [];
 const homes: string[] = [];
@@ -120,6 +120,19 @@ describe('BrowseRelay', () => {
       .rejects.toThrow('not reachable');
   });
 
+  test('keeps the service token out of the spawned relay environment', () => {
+    const env = browseEnv(
+      { browseBin: 'browse', relayPort: 19988, browseHome: '/tmp/browse-home', startRelay: true },
+      { PATH: '/bin', OPENCHAMBER_SERVICE_TOKEN: 'host-secret', OPENCHAMBER_SERVICE_PORT: '1234' },
+    );
+
+    expect(env.OPENCHAMBER_SERVICE_TOKEN).toBeUndefined();
+    expect(env.OPENCHAMBER_SERVICE_PORT).toBeUndefined();
+    expect(env.OPENCODE_BROWSER_PORT).toBe('19988');
+    expect(env.OPENCODE_BROWSER_HOME).toBe('/tmp/browse-home');
+    expect(env.PATH).toBe('/bin');
+  });
+
   test('stops at the caller deadline instead of waiting for the relay timeout', async () => {
     const port = await startRelay((request, response) => {
       if (request.url === '/version') {
@@ -155,5 +168,25 @@ describe('BrowseRelay', () => {
       deadline: Date.now() + 500,
     })).rejects.toThrow('did not answer within the time limit');
     expect(Date.now() - start).toBeLessThan(2_000);
+  });
+
+  test('reports a missing browse binary instead of waiting out the start budget', async () => {
+    const home = tempHome();
+    fs.writeFileSync(relayTokenPath({ browseBin: 'browse', relayPort: 1, browseHome: home, startRelay: true }), 'test-token\n');
+    const relay = new BrowseRelay({
+      browseBin: '/nonexistent/browse-bridge-test',
+      relayPort: 1,
+      browseHome: home,
+      startRelay: true,
+    });
+
+    const start = Date.now();
+    await expect(relay.execute('return 1', {
+      sessionId: 'oc-ses_1',
+      timeoutMs: 1_000,
+      deadline: Date.now() + 2_000,
+      startBudgetMs: 1_500,
+    })).rejects.toThrow('was not found');
+    expect(Date.now() - start).toBeLessThan(2_500);
   });
 });
