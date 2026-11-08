@@ -7,7 +7,7 @@ const out = path.join(root, 'dist', 'extension');
 fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(path.join(out, 'service'), { recursive: true });
 
-for (const file of ['package.json', 'README.md', 'DOCUMENTATION.md', 'browse-bridge.example.json']) {
+for (const file of ['package.json', 'README.md', 'DOCUMENTATION.md', 'LICENSE', 'browse-bridge.example.json']) {
   fs.copyFileSync(path.join(root, file), path.join(out, file));
 }
 const localConfig = path.join(root, 'browse-bridge.json');

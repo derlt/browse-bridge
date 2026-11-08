@@ -76,7 +76,11 @@ All 12 actions are implemented: open, snapshot, click, type, select, scroll, bac
 - No console problems in snapshots. The relay reports counts in `aftermath`, not the messages.
 - No handoff, site secrets, recording or network capture through `openchamber_web`. The agent can still use browse's own MCP tools for those.
 - The bridge does not adopt user tabs. It only drives tabs it opened.
-- The relay's HTTP API is internal to browse. Pin the browse version you tested; a change to the API can break the bridge.
+- The relay's HTTP API is internal to browse. The bridge is tested with browse 0.0.15; a change to the API can break it.
+
+## License
+
+MIT. See `LICENSE`.
 
 ## Security
 

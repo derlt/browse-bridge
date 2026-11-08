@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "description": "OpenChamber browser provider that drives the user's browser through the browse relay.",
+  "license": "MIT",
+  "author": "derlt",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/derlt/browse-bridge.git"
+  },
+  "homepage": "https://github.com/derlt/browse-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/derlt/browse-bridge/issues"
+  },
   "openchamber": {
     "apiVersion": 1,
     "engines": {

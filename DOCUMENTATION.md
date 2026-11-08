@@ -61,6 +61,14 @@ The browser provider is started on the first action, often before an agent has u
 
 The OpenChamber service environment is an allowlist. It carries PATH and HOME but not `OPENCODE_BROWSER_*`, so a custom relay port or data root cannot arrive through the shell. `browse-bridge.json` is read next to the manifest and is the only place those values can differ from browse's defaults.
 
+### Why every action has a deadline
+
+The host gives an open 45 s and every other action 20 s. The bridge spends part of that on a cold relay start and on the tab list, so it passes one deadline through `ensure`, `targets` and `execute` and reserves a margin for the HTTP answer. Without it, the host gives up first and the action can still run after the agent saw a timeout.
+
+### Why the relay does not inherit the service token
+
+The service token authenticates the host to the service. `browse serve` is spawned detached and outlives the service, so it must not keep the token. `browseEnv` deletes `OPENCHAMBER_SERVICE_TOKEN` and `OPENCHAMBER_SERVICE_PORT` before it adds the browse variables.
+
 ### Why no handoff, secrets, recording or network capture
 
 The browser provider contract has 12 page actions. Handoff, site secrets, recordings and network capture belong to browse's MCP tools, where the agent can name them directly. Adding them to `openchamber_web` would widen the contract and the approval surface for behavior the host does not route. The bridge leaves them to browse.
